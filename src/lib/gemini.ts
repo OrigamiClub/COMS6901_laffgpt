@@ -21,12 +21,14 @@ export type StepResult =
   | { text: string; list: string[] | null; image: string | null; apiModel: string }
   | { error: string };
 
-// Each attempt gets this long, and the step as a whole this long, so one
-// step stays well inside a Vercel function's time limit.
+// Each attempt gets at most this long, and never more than the time left
+// before the caller's deadline, so a step always answers before Vercel's
+// 60s function limit (see run/page.tsx) cuts it off.
 // Image models are slower, so they get longer per attempt.
 const ATTEMPT_TIMEOUT_MS = 20 * 1000;
 const IMAGE_ATTEMPT_TIMEOUT_MS = 40 * 1000;
-const STEP_DEADLINE_MS = 50 * 1000;
+// Below this, a new attempt isn't worth starting.
+const MIN_ATTEMPT_MS = 5 * 1000;
 const RETRY_DELAY_MS = 1500;
 const MAX_LOGGED_TEXT = 20_000;
 
@@ -108,6 +110,7 @@ export async function runGeminiStep({
   parts,
   temperature,
   outputFormat,
+  deadline,
 }: {
   db: SupabaseClient;
   generationId: number;
@@ -116,6 +119,8 @@ export async function runGeminiStep({
   parts: Part[];
   temperature: number;
   outputFormat: OutputFormat;
+  // Epoch ms by which the last attempt must have finished.
+  deadline: number;
 }): Promise<StepResult> {
   // Trimmed, and stripped of quotes, in case they were pasted in with the
   // key on Vercel.
@@ -151,14 +156,17 @@ export async function runGeminiStep({
     .eq("generation_request_id", generationId);
   let attempt = count ?? 0;
 
-  const deadline = Date.now() + STEP_DEADLINE_MS;
   const skip = new Set<string>();
   let lastStatus: number | null = null;
   let lastMessage = "";
 
   for (const [i, m] of models.entries()) {
     if (skip.has(m.name)) continue;
-    if (Date.now() > deadline) break;
+    const remaining = deadline - Date.now();
+    if (remaining < MIN_ATTEMPT_MS) {
+      lastMessage ||= "ran out of time before Gemini answered";
+      break;
+    }
     if (i === 1) await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
     attempt += 1;
 
@@ -195,7 +203,9 @@ export async function runGeminiStep({
           method: "POST",
           headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
           body,
-          signal: AbortSignal.timeout(wantsImage ? IMAGE_ATTEMPT_TIMEOUT_MS : ATTEMPT_TIMEOUT_MS),
+          signal: AbortSignal.timeout(
+            Math.min(wantsImage ? IMAGE_ATTEMPT_TIMEOUT_MS : ATTEMPT_TIMEOUT_MS, remaining)
+          ),
         }
       );
     } catch (error) {

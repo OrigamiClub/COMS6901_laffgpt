@@ -115,7 +115,13 @@ async function fail(
 }
 
 // Runs step `index` (0-based) of a run that's still going.
+// A step's whole budget, inside the page's 60s maxDuration: the rest is
+// left for saving a generated image and recording the result.
+const STEP_BUDGET_MS = 48 * 1000;
+const IMAGE_FETCH_TIMEOUT_MS = 10 * 1000;
+
 export async function runStep(runId: number, index: number): Promise<StepRunResult> {
+  const deadline = Date.now() + STEP_BUDGET_MS;
   const { supabase } = await requireAdmin();
   if (!Number.isInteger(runId) || !Number.isInteger(index) || index < 0) {
     return { error: "Bad request." };
@@ -166,7 +172,7 @@ export async function runStep(runId: number, index: number): Promise<StepRunResu
   const prompt = fillPrompt(step.prompt, input, originalText);
   const parts: Part[] = [];
   if (step.include_image && imageUrl) {
-    const image = await fetchOwnCrackImage(imageUrl);
+    const image = await fetchOwnCrackImage(imageUrl, IMAGE_FETCH_TIMEOUT_MS);
     if ("error" in image) return fail(supabase, runId, image.error);
     parts.push({ inline_data: { mime_type: image.type, data: image.data } });
   }
@@ -184,6 +190,7 @@ export async function runStep(runId: number, index: number): Promise<StepRunResu
     parts,
     temperature: step.temperature,
     outputFormat: step.output_format,
+    deadline,
   });
   if ("error" in result) return fail(supabase, runId, `Step ${index + 1} (${step.name}): ${result.error}`);
 

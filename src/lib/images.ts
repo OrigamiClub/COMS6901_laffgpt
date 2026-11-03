@@ -66,14 +66,15 @@ const FETCH_TIMEOUT_MS = 20 * 1000;
 
 // Downloads and checks a stored crack image, ready to send to Gemini.
 export async function fetchOwnCrackImage(
-  url: string
+  url: string,
+  timeoutMs = FETCH_TIMEOUT_MS
 ): Promise<{ data: string; type: string } | { error: string }> {
   if (!url.startsWith(OWN_CRACK_IMAGE_PREFIX)) {
     return { error: "This picture is hosted elsewhere — choose it again to caption it." };
   }
 
   const response = await fetch(url, {
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) {
     return { error: "Couldn't load the current image." };
