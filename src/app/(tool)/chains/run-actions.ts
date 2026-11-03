@@ -19,7 +19,14 @@ export type StartResult =
   | { error: string };
 
 export type StepRunResult =
-  | { output: string; list: string[] | null; model: string; prompt: string; done: boolean }
+  | {
+      output: string;
+      list: string[] | null;
+      image: string | null;
+      model: string;
+      prompt: string;
+      done: boolean;
+    }
   | { error: string };
 
 // Validates the input (an image, text, or both), stores the image in the
@@ -128,27 +135,38 @@ export async function runStep(runId: number, index: number): Promise<StepRunResu
   const step = steps[index];
   if (!step?.prompt) return fail(supabase, runId, "The chain changed while it was running.");
 
+  // What the earlier steps produced: {{input}} is the newest text (an image
+  // step that only returns a picture passes the text before it along), and
+  // the image sent is the newest generated one, else the run's upload.
   const originalText = run.input_text ?? "";
   let input = originalText;
+  let imageUrl: string | null = run.image_url;
   if (index > 0) {
-    const previous = steps[index - 1];
-    const { data: reply } = await supabase
+    const earlier = steps.slice(0, index);
+    const { data: replies } = await supabase
       .from("llm_responses")
-      .select("response_text")
+      .select("step_id, response_text, image_url")
       .eq("generation_request_id", runId)
-      .eq("step_id", previous.id)
+      .in("step_id", earlier.map((s) => s.id))
       .eq("ok", true)
-      .order("id", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (!reply) return fail(supabase, runId, `Step ${index} hasn't produced anything yet.`);
-    input = replyAsText(reply.response_text, previous.output_format);
+      .order("id");
+    const byStep = new Map((replies ?? []).map((r) => [r.step_id as number, r]));
+    if (!byStep.has(earlier[index - 1].id)) {
+      return fail(supabase, runId, `Step ${index} hasn't produced anything yet.`);
+    }
+    for (const s of earlier) {
+      const reply = byStep.get(s.id);
+      if (!reply) continue;
+      const text = replyAsText(reply.response_text, s.output_format);
+      if (text.trim()) input = text;
+      if (reply.image_url) imageUrl = reply.image_url;
+    }
   }
 
   const prompt = fillPrompt(step.prompt, input, originalText);
   const parts: Part[] = [];
-  if (step.include_image && run.image_url) {
-    const image = await fetchOwnCrackImage(run.image_url);
+  if (step.include_image && imageUrl) {
+    const image = await fetchOwnCrackImage(imageUrl);
     if ("error" in image) return fail(supabase, runId, image.error);
     parts.push({ inline_data: { mime_type: image.type, data: image.data } });
   }
@@ -177,13 +195,22 @@ export async function runStep(runId: number, index: number): Promise<StepRunResu
         status: "succeeded",
         output: result.text,
         output_json: result.list,
+        // The newest image a step generated, if any did.
+        output_image_url: result.image ?? (imageUrl !== run.image_url ? imageUrl : null),
         finished_at: new Date().toISOString(),
       })
       .eq("id", runId);
     if (error) console.error("Couldn't finish the run", error);
   }
 
-  return { output: result.text, list: result.list, model: result.apiModel, prompt, done };
+  return {
+    output: result.text,
+    list: result.list,
+    image: result.image,
+    model: result.apiModel,
+    prompt,
+    done,
+  };
 }
 
 // The run form calls this if the admin stops a run or leaves mid-way.

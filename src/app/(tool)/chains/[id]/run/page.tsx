@@ -35,6 +35,7 @@ export default async function RunPage({ params, searchParams }: PageProps<"/chai
         id: s.id,
         name: s.name,
         includeImage: s.include_image,
+        makesImage: s.output_format === "image",
         temperature: s.temperature,
         hasPrompt: Boolean(s.prompt?.trim()),
       }))}

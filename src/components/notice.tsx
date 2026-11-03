@@ -7,6 +7,10 @@ const MESSAGES: Record<string, { text: string; error?: boolean }> = {
   "step-saved": { text: "Step saved." },
   "step-deleted": { text: "Step deleted. The steps after it moved up." },
   "step-moved": { text: "Steps reordered." },
+  "bad-model": {
+    text: "That model doesn't fit the step's output: image steps need an image model, text and list steps a text model.",
+    error: true,
+  },
   "built-in": { text: "The meme board's built-in chains are read-only.", error: true },
   duplicate: { text: "Another chain already uses that slug.", error: true },
   "in-use": { text: "Something still uses that, so it wasn't deleted.", error: true },

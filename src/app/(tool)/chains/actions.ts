@@ -19,7 +19,7 @@ function chainIdField(formData: FormData) {
 // Refuses changes to the board's built-in chains before touching anything,
 // so the admin gets a clear message instead of a silent RLS no-op.
 async function requireEditableChain(
-  supabase: Awaited<ReturnType<typeof requireAdmin>>["supabase"],
+  supabase: Supabase,
   chainId: number
 ) {
   const { data } = await supabase
@@ -38,12 +38,59 @@ function chainFields(formData: FormData) {
   return { name, slug: field(formData, "slug") ? slug : "", description };
 }
 
-function stepFields(formData: FormData) {
+type Supabase = Awaited<ReturnType<typeof requireAdmin>>["supabase"];
+
+// The step's model as an llm_models id. "api:<name>" is an image model the
+// Gemini key offers that isn't registered yet; it's added with purpose
+// 'image' first. Image steps need an image model and text steps a text
+// model; null when the choice doesn't fit (or "" = the default).
+async function resolveModel(
+  supabase: Supabase,
+  raw: string,
+  outputFormat: "text" | "list" | "image"
+): Promise<{ id: number | null } | null> {
+  const wantsImage = outputFormat === "image";
+  if (!raw) return { id: null };
+
+  if (raw.startsWith("api:")) {
+    const apiModel = raw.slice(4);
+    if (!wantsImage || !/^[\w.-]{1,100}$/.test(apiModel)) return null;
+    const { data: provider } = await supabase
+      .from("llm_providers")
+      .select("id")
+      .eq("slug", "gemini")
+      .maybeSingle();
+    if (!provider) return null;
+    const { data: existing } = await supabase
+      .from("llm_models")
+      .select("id")
+      .eq("provider_id", provider.id)
+      .eq("api_model", apiModel)
+      .eq("purpose", "image")
+      .maybeSingle();
+    if (existing) return { id: existing.id };
+    const { data: added, error } = await supabase
+      .from("llm_models")
+      .insert({ provider_id: provider.id, name: apiModel, api_model: apiModel, purpose: "image", priority: 100 })
+      .select("id")
+      .single();
+    if (error) console.error("Couldn't register image model", error);
+    return added ? { id: added.id } : null;
+  }
+
+  const id = Number(raw);
+  if (!Number.isInteger(id) || id <= 0) return null;
+  const { data: model } = await supabase.from("llm_models").select("purpose").eq("id", id).maybeSingle();
+  if (!model || (model.purpose === "image") !== wantsImage) return null;
+  return { id };
+}
+
+async function stepFields(supabase: Supabase, formData: FormData) {
   const name = field(formData, "name", 80);
   const prompt = formData.get("prompt")?.toString().trim() ?? "";
   const temperature = Number(formData.get("temperature"));
-  const modelId = Number(formData.get("model_id"));
-  const outputFormat = formData.get("output_format") === "list" ? "list" : "text";
+  const format = formData.get("output_format");
+  const outputFormat = format === "list" || format === "image" ? format : "text";
 
   if (
     !name ||
@@ -55,12 +102,14 @@ function stepFields(formData: FormData) {
   ) {
     return null;
   }
+  const model = await resolveModel(supabase, formData.get("model_id")?.toString() ?? "", outputFormat);
+  if (!model) return "bad-model" as const;
   return {
     name,
     prompt,
     description: field(formData, "description", 300),
     temperature: Math.round(temperature * 100) / 100,
-    model_id: Number.isInteger(modelId) && modelId > 0 ? modelId : null,
+    model_id: model.id,
     include_image: formData.get("include_image") === "on",
     output_format: outputFormat,
   };
@@ -126,8 +175,10 @@ export async function createStep(formData: FormData) {
   const { supabase } = await requireAdmin();
   const chainId = chainIdField(formData);
   if (!chainId) redirect("/?notice=invalid");
-  const step = stepFields(formData);
-  if (!step) redirect(`${chainPath(chainId)}?notice=invalid#new-step`);
+  const step = await stepFields(supabase, formData);
+  if (!step || step === "bad-model") {
+    redirect(`${chainPath(chainId)}?notice=${step || "invalid"}#new-step`);
+  }
   await requireEditableChain(supabase, chainId);
 
   const { data: last } = await supabase
@@ -152,8 +203,10 @@ export async function updateStep(formData: FormData) {
   const chainId = chainIdField(formData);
   const id = idField(formData);
   if (!chainId || !id) redirect("/?notice=invalid");
-  const step = stepFields(formData);
-  if (!step) redirect(`${chainPath(chainId)}?notice=invalid#step-${id}`);
+  const step = await stepFields(supabase, formData);
+  if (!step || step === "bad-model") {
+    redirect(`${chainPath(chainId)}?notice=${step || "invalid"}#step-${id}`);
+  }
   await requireEditableChain(supabase, chainId);
 
   const { error } = await supabase

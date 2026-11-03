@@ -12,6 +12,10 @@ It uses the same Supabase project and Gemini key. Only accounts with
 - Add, edit, delete and reorder a chain's steps (↑/↓ or "Move to position").
   Each step has its own prompt, Gemini model, temperature (0–2), output
   format (text or a list), and can send the run's image.
+- Generate images: a step with output **Image** calls an image-capable
+  Gemini model (the step editor lists the ones the key can use) and saves the
+  picture to storage. Later steps that send the image get the newest
+  generated one, so a chain can go photo → joke → meme image → captions.
 - Run a chain on an image, some text, or both. Steps run one at a time and
   each output is shown as it arrives. `{{input}}` in a prompt is the previous
   step's output (the run's text for step 1); `{{original_text}}` is always the
@@ -25,8 +29,9 @@ listed read-only, with their runs from the board under Media.
 
 ## Setup
 
-1. Run `supabase/migrations/20261103000000_prompt_chain_tool.sql` once in the
-   Supabase SQL editor. It needs the admin repo's migrations first.
+1. Run `supabase/migrations/20261103000000_prompt_chain_tool.sql`, then
+   `20261103010000_image_steps.sql`, once each in the Supabase SQL editor.
+   They need the admin repo's migrations first.
 2. Copy `.env.example` to `.env.local` and fill it in.
 3. Add `http://localhost:3000/auth/callback` and
    `https://<vercel-domain>/auth/callback` to Supabase → Authentication → URL

@@ -1,3 +1,5 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
+
 // Server-side checks for uploaded images. The browser's `accept="image/*"`
 // and the file's claimed type can't be trusted, so we look at the first
 // bytes to decide what the file really is.
@@ -85,4 +87,30 @@ export async function fetchOwnCrackImage(
 
   const data = Buffer.from(await image.arrayBuffer()).toString("base64");
   return { data, type: checked.type };
+}
+
+// Saves an image a model generated (base64) to the crack bucket and
+// returns its public URL. Checked like an upload, so only real
+// JPG/PNG/GIF/WebP files under the size limit are stored.
+export async function storeGeneratedImage(
+  db: SupabaseClient,
+  base64: string,
+  claimedType: string
+): Promise<{ url: string } | { error: string }> {
+  const bytes = Buffer.from(base64, "base64");
+  const blob = new Blob([bytes], { type: claimedType });
+  const checked = await checkImage(blob);
+  if ("error" in checked) {
+    return { error: `Gemini's image couldn't be saved: ${checked.error}` };
+  }
+
+  const path = `prompt-chains/generated/${crypto.randomUUID()}.${checked.extension}`;
+  const { error } = await db.storage
+    .from("cracks")
+    .upload(path, blob, { contentType: checked.type });
+  if (error) {
+    console.error("Couldn't store generated image", error);
+    return { error: "Couldn't save the generated image to storage." };
+  }
+  return { url: db.storage.from("cracks").getPublicUrl(path).data.publicUrl };
 }

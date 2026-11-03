@@ -1,10 +1,13 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { storeGeneratedImage } from "@/lib/images";
 
 // Runs one step of a prompt chain on Gemini, with the step's own model and
 // temperature. If that model is overloaded (429/503) it's tried once more,
-// then the other active caption models from llm_models take over, so a
-// busy spell doesn't fail the whole chain. Every attempt is logged to
+// then the other active models of the same kind from llm_models take over
+// (caption models for text and lists, image models for images), so a busy
+// spell doesn't fail the whole chain. Image steps ask for an image back,
+// which is saved to storage. Every attempt is logged to
 // llm_responses against the step, which is where the media page reads
 // each step's output from.
 
@@ -12,15 +15,17 @@ export type Part =
   | { text: string }
   | { inline_data: { mime_type: string; data: string } };
 
-export type OutputFormat = "text" | "list";
+export type OutputFormat = "text" | "list" | "image";
 
 export type StepResult =
-  | { text: string; list: string[] | null; apiModel: string }
+  | { text: string; list: string[] | null; image: string | null; apiModel: string }
   | { error: string };
 
 // Each attempt gets this long, and the step as a whole this long, so one
 // step stays well inside a Vercel function's time limit.
+// Image models are slower, so they get longer per attempt.
 const ATTEMPT_TIMEOUT_MS = 20 * 1000;
+const IMAGE_ATTEMPT_TIMEOUT_MS = 40 * 1000;
 const STEP_DEADLINE_MS = 50 * 1000;
 const RETRY_DELAY_MS = 1500;
 const MAX_LOGGED_TEXT = 20_000;
@@ -29,14 +34,26 @@ const LIST_SCHEMA = { type: "ARRAY", items: { type: "STRING" } };
 
 type Model = { name: string; id: number | null };
 
-// The step's model first, tried twice, then the other active caption
-// models in priority order.
-async function modelsToTry(db: SupabaseClient, first: Model | null): Promise<Model[]> {
+type InlineData = { data: string; mimeType?: string; mime_type?: string };
+type ReplyPart = {
+  text?: string;
+  thought?: boolean;
+  inlineData?: InlineData;
+  inline_data?: InlineData;
+};
+
+// The step's model first, tried twice, then the other active models for
+// the same purpose in priority order.
+async function modelsToTry(
+  db: SupabaseClient,
+  first: Model | null,
+  purpose: "caption" | "image"
+): Promise<Model[]> {
   const { data, error } = await db
     .from("llm_models")
     .select("id, api_model, llm_providers!inner (slug)")
     .eq("llm_providers.slug", "gemini")
-    .eq("purpose", "caption")
+    .eq("purpose", purpose)
     .eq("is_active", true)
     .order("priority")
     .order("id");
@@ -84,8 +101,15 @@ export async function runGeminiStep({
   const apiKey = process.env.GEMINI_API_KEY?.trim().replace(/^["']|["']$/g, "");
   if (!apiKey) return { error: "Gemini isn't configured (GEMINI_API_KEY)." };
 
-  const models = await modelsToTry(db, model);
-  if (models.length === 0) return { error: "No Gemini models are switched on." };
+  const wantsImage = outputFormat === "image";
+  const models = await modelsToTry(db, model, wantsImage ? "image" : "caption");
+  if (models.length === 0) {
+    return {
+      error: wantsImage
+        ? "Pick an image model for this step first."
+        : "No Gemini models are switched on.",
+    };
+  }
 
   const body = JSON.stringify({
     contents: [{ parts }],
@@ -94,6 +118,7 @@ export async function runGeminiStep({
       ...(outputFormat === "list"
         ? { responseMimeType: "application/json", responseSchema: LIST_SCHEMA }
         : {}),
+      ...(wantsImage ? { responseModalities: ["TEXT", "IMAGE"] } : {}),
     },
   });
 
@@ -122,6 +147,7 @@ export async function runGeminiStep({
       ok: boolean;
       response_text?: string | null;
       error?: string | null;
+      image_url?: string | null;
     }) =>
       db
         .from("llm_responses")
@@ -148,11 +174,12 @@ export async function runGeminiStep({
           method: "POST",
           headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
           body,
-          signal: AbortSignal.timeout(ATTEMPT_TIMEOUT_MS),
+          signal: AbortSignal.timeout(wantsImage ? IMAGE_ATTEMPT_TIMEOUT_MS : ATTEMPT_TIMEOUT_MS),
         }
       );
     } catch (error) {
       console.error(`Gemini ${m.name} request failed`, error);
+      lastMessage = `${m.name}: no answer in time (${String(error).slice(0, 100)})`;
       await log({ http_status: null, ok: false, error: String(error) });
       continue;
     }
@@ -173,11 +200,36 @@ export async function runGeminiStep({
     }
 
     const result = await response.json();
-    const reply: string =
-      result.candidates?.[0]?.content?.parts
-        ?.map((part: { text?: string }) => part.text ?? "")
-        .join("")
-        .trim() ?? "";
+    const candidate = result.candidates?.[0];
+    const replyParts: ReplyPart[] = candidate?.content?.parts ?? [];
+    const reply = replyParts
+      .filter((part) => !part.thought)
+      .map((part) => part.text ?? "")
+      .join("")
+      .trim();
+
+    if (wantsImage) {
+      const imagePart = replyParts
+        .map((part) => part.inlineData ?? part.inline_data)
+        .find((data) => data?.data);
+      if (!imagePart) {
+        const why = candidate?.finishReason ?? result.promptFeedback?.blockReason ?? "no image in the reply";
+        lastMessage = `${m.name}: ${why}${reply ? ` — "${reply.slice(0, 150)}"` : ""}`;
+        await log({ http_status: response.status, ok: false, response_text: reply, error: `No image (${why})` });
+        continue;
+      }
+      const stored = await storeGeneratedImage(
+        db,
+        imagePart.data,
+        imagePart.mimeType ?? imagePart.mime_type ?? "image/png"
+      );
+      if ("error" in stored) {
+        await log({ http_status: response.status, ok: false, response_text: reply, error: stored.error });
+        return { error: stored.error };
+      }
+      await log({ http_status: response.status, ok: true, response_text: reply || null, image_url: stored.url });
+      return { text: reply, list: null, image: stored.url, apiModel: m.name };
+    }
 
     let list: string[] | null = null;
     if (outputFormat === "list") {
@@ -196,12 +248,14 @@ export async function runGeminiStep({
     }
 
     await log({ http_status: response.status, ok: true, response_text: reply });
-    return { text: list ? list.join("\n") : reply, list, apiModel: m.name };
+    return { text: list ? list.join("\n") : reply, list, image: null, apiModel: m.name };
   }
 
   if (lastStatus === 429 || lastStatus === 503) {
     const kind = lastStatus === 429 ? "rate or quota limit" : "overloaded";
     return { error: `Every model hit a limit (${kind}). Last reply — ${lastMessage}` };
   }
-  return { error: "Gemini couldn't answer this step. Try again." };
+  return {
+    error: `Gemini couldn't answer this step${lastMessage ? ` (${lastMessage})` : ""}. Try again.`,
+  };
 }

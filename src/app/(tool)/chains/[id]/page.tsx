@@ -1,6 +1,14 @@
 import { notFound } from "next/navigation";
 import { requireAdmin } from "@/lib/admin";
-import { loadChain, loadModelOptions, MAX_PROMPT, type ModelOption, type Step } from "@/lib/chains";
+import {
+  discoverImageModels,
+  loadChain,
+  loadModelOptions,
+  MAX_PROMPT,
+  type DiscoveredModel,
+  type ModelOption,
+  type Step,
+} from "@/lib/chains";
 import ConfirmButton from "@/components/confirm-button";
 import Notice from "@/components/notice";
 import TemperatureField from "@/components/temperature-field";
@@ -24,6 +32,7 @@ export default async function ChainPage({ params, searchParams }: PageProps<"/ch
   const [loaded, models] = await Promise.all([loadChain(supabase, id), loadModelOptions(supabase)]);
   if (!loaded) notFound();
   const { chain, steps } = loaded;
+  const discovered = chain.is_builtin ? [] : await discoverImageModels(models);
 
   if (chain.is_builtin) {
     return (
@@ -133,7 +142,7 @@ export default async function ChainPage({ params, searchParams }: PageProps<"/ch
               <form action={updateStep} className="flex min-w-0 flex-1 flex-col gap-4">
                 <input type="hidden" name="id" value={step.id} />
                 <input type="hidden" name="chain_id" value={chain.id} />
-                <StepFields step={step} models={models} />
+                <StepFields step={step} models={models} discovered={discovered} />
                 <div className="flex flex-wrap items-center gap-2 border-t border-black/10 pt-4 dark:border-white/15">
                   <button type="submit" className="btn-primary">
                     Save step
@@ -197,7 +206,7 @@ export default async function ChainPage({ params, searchParams }: PageProps<"/ch
         <h2 className="section-title">Add step {steps.length + 1}</h2>
         <form action={createStep} className="flex flex-col gap-4">
           <input type="hidden" name="chain_id" value={chain.id} />
-          <StepFields models={models} first={steps.length === 0} />
+          <StepFields models={models} discovered={discovered} first={steps.length === 0} />
           <div>
             <button type="submit" className="btn-primary">
               + Add step
@@ -221,12 +230,16 @@ function StepNumber({ n }: { n: number }) {
 function StepFields({
   step,
   models,
+  discovered,
   first = false,
 }: {
   step?: Step;
   models: ModelOption[];
+  discovered: DiscoveredModel[];
   first?: boolean;
 }) {
+  const textModels = models.filter((m) => m.purpose !== "image");
+  const imageModels = models.filter((m) => m.purpose === "image");
   return (
     <>
       <label className={LABEL}>
@@ -260,12 +273,29 @@ function StepFields({
         <label className={LABEL}>
           Model
           <select name="model_id" defaultValue={step?.model_id ?? ""} className={INPUT}>
-            <option value="">Default (first active caption model)</option>
-            {models.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name} ({m.api_model})
-              </option>
-            ))}
+            <option value="">Default (first active model for the output)</option>
+            <optgroup label="Text models (text and list output)">
+              {textModels.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name} ({m.api_model})
+                </option>
+              ))}
+            </optgroup>
+            {(imageModels.length > 0 || discovered.length > 0) && (
+              <optgroup label="Image models (image output)">
+                {imageModels.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                    {m.name === m.api_model ? "" : ` (${m.api_model})`}
+                  </option>
+                ))}
+                {discovered.map((m) => (
+                  <option key={m.api_model} value={`api:${m.api_model}`}>
+                    {m.name} ({m.api_model})
+                  </option>
+                ))}
+              </optgroup>
+            )}
           </select>
         </label>
         <TemperatureField key={`${step?.id}-${step?.temperature}`} defaultValue={step?.temperature ?? 1} />
@@ -274,6 +304,7 @@ function StepFields({
           <select name="output_format" defaultValue={step?.output_format ?? "text"} className={INPUT}>
             <option value="text">Text</option>
             <option value="list">List (one item per caption)</option>
+            <option value="image">Image (generate a picture)</option>
           </select>
         </label>
         <label className="flex items-center gap-2 self-end pb-2 text-sm">
@@ -283,7 +314,7 @@ function StepFields({
             defaultChecked={step?.include_image ?? first}
             className="size-4 accent-[var(--title)]"
           />
-          Send the image with this step
+          Send the image with this step (the newest generated one, else the upload)
         </label>
       </div>
       <label className={LABEL}>
