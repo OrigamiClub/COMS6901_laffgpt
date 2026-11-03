@@ -68,16 +68,37 @@ async function modelsToTry(
 }
 
 // The human-readable part of a Gemini error reply, e.g. "API key not
-// valid. Please pass a valid API key."
+// valid. Please pass a valid API key." Quota errors are summarised from
+// their details (which quota, its limit, when to retry), since Google's
+// message buries them after a long preamble.
 function geminiMessage(body: string) {
   try {
-    const message = JSON.parse(body)?.error?.message;
+    const error = JSON.parse(body)?.error;
+    const details: { "@type"?: string; violations?: QuotaViolation[]; retryDelay?: string }[] =
+      error?.details ?? [];
+    const violations = details.flatMap((d) => d.violations ?? []);
+    if (violations.length > 0) {
+      const retry = details.find((d) => d.retryDelay)?.retryDelay;
+      const zero = violations.some((v) => v.quotaValue === "0");
+      const which = violations
+        .map((v) => `${v.quotaId ?? v.quotaMetric ?? "unknown quota"} (limit ${v.quotaValue ?? "?"})`)
+        .join("; ");
+      return (
+        (zero
+          ? "This key's plan has no allowance for this model (limit 0), so it needs billing on the key's Google Cloud project. "
+          : "Quota exceeded. ") +
+        `Quota: ${which}${retry ? `. Retry in ${retry}` : ""}.`
+      ).slice(0, 500);
+    }
+    const message = error?.message;
     if (typeof message === "string" && message) return message.slice(0, 300);
   } catch {
     // Not JSON; fall through.
   }
   return body.slice(0, 300) || "no details";
 }
+
+type QuotaViolation = { quotaMetric?: string; quotaId?: string; quotaValue?: string };
 
 export async function runGeminiStep({
   db,
