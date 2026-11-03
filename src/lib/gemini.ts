@@ -108,6 +108,7 @@ export async function runGeminiStep({
   const deadline = Date.now() + STEP_DEADLINE_MS;
   const skip = new Set<string>();
   let lastStatus: number | null = null;
+  let lastMessage = "";
 
   for (const [i, m] of models.entries()) {
     if (skip.has(m.name)) continue;
@@ -159,6 +160,7 @@ export async function runGeminiStep({
     if (!response.ok) {
       const text = await response.text();
       lastStatus = response.status;
+      lastMessage = `${m.name}: ${geminiMessage(text)}`;
       console.error(`Gemini ${m.name} error`, response.status, text);
       await log({ http_status: response.status, ok: false, error: text });
       const dailyQuota = text.includes("RESOURCE_EXHAUSTED") && text.includes("PerDay");
@@ -198,7 +200,8 @@ export async function runGeminiStep({
   }
 
   if (lastStatus === 429 || lastStatus === 503) {
-    return { error: "Gemini is swamped right now. Try again in a minute." };
+    const kind = lastStatus === 429 ? "rate or quota limit" : "overloaded";
+    return { error: `Every model hit a limit (${kind}). Last reply — ${lastMessage}` };
   }
   return { error: "Gemini couldn't answer this step. Try again." };
 }
