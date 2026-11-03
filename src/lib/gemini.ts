@@ -50,6 +50,18 @@ async function modelsToTry(db: SupabaseClient, first: Model | null): Promise<Mod
   return [preferred, preferred, ...fallbacks];
 }
 
+// The human-readable part of a Gemini error reply, e.g. "API key not
+// valid. Please pass a valid API key."
+function geminiMessage(body: string) {
+  try {
+    const message = JSON.parse(body)?.error?.message;
+    if (typeof message === "string" && message) return message.slice(0, 300);
+  } catch {
+    // Not JSON; fall through.
+  }
+  return body.slice(0, 300) || "no details";
+}
+
 export async function runGeminiStep({
   db,
   generationId,
@@ -67,7 +79,9 @@ export async function runGeminiStep({
   temperature: number;
   outputFormat: OutputFormat;
 }): Promise<StepResult> {
-  const apiKey = process.env.GEMINI_API_KEY;
+  // Trimmed, and stripped of quotes, in case they were pasted in with the
+  // key on Vercel.
+  const apiKey = process.env.GEMINI_API_KEY?.trim().replace(/^["']|["']$/g, "");
   if (!apiKey) return { error: "Gemini isn't configured (GEMINI_API_KEY)." };
 
   const models = await modelsToTry(db, model);
@@ -151,7 +165,7 @@ export async function runGeminiStep({
       if (response.status === 404 || dailyQuota) {
         skip.add(m.name);
       } else if (response.status !== 429 && response.status !== 503) {
-        return { error: `Gemini refused the request (HTTP ${response.status}).` };
+        return { error: `Gemini refused the request (HTTP ${response.status}): ${geminiMessage(text)}` };
       }
       continue;
     }
