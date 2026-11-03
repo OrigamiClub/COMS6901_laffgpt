@@ -24,9 +24,11 @@ export type StepResult =
 // Each attempt gets at most this long, and never more than the time left
 // before the caller's deadline, so a step always answers before Vercel's
 // 60s function limit (see run/page.tsx) cuts it off.
-// Image models are slower, so they get longer per attempt.
-const ATTEMPT_TIMEOUT_MS = 20 * 1000;
-const IMAGE_ATTEMPT_TIMEOUT_MS = 40 * 1000;
+// Newer "thinking" models can take 20-30s on a big prompt with an image,
+// and image models longer, so attempts are generous; a model that times
+// out isn't retried (the next one gets the time instead).
+const ATTEMPT_TIMEOUT_MS = 35 * 1000;
+const IMAGE_ATTEMPT_TIMEOUT_MS = 45 * 1000;
 // Below this, a new attempt isn't worth starting.
 const MIN_ATTEMPT_MS = 5 * 1000;
 const RETRY_DELAY_MS = 1500;
@@ -159,6 +161,8 @@ export async function runGeminiStep({
   const skip = new Set<string>();
   let lastStatus: number | null = null;
   let lastMessage = "";
+  // One short note per attempt, for the error message.
+  const tried: string[] = [];
 
   for (const [i, m] of models.entries()) {
     if (skip.has(m.name)) continue;
@@ -210,7 +214,11 @@ export async function runGeminiStep({
       );
     } catch (error) {
       console.error(`Gemini ${m.name} request failed`, error);
-      lastMessage = `${m.name}: no answer in time (${String(error).slice(0, 100)})`;
+      const timedOut = error instanceof Error && error.name === "TimeoutError";
+      const seconds = Math.round((Date.now() - started) / 1000);
+      lastMessage = `${m.name}: ${timedOut ? `no answer within ${seconds}s` : String(error).slice(0, 100)}`;
+      tried.push(`${m.name} (${timedOut ? `timed out after ${seconds}s` : "network error"})`);
+      if (timedOut) skip.add(m.name);
       await log({ http_status: null, ok: false, error: String(error) });
       continue;
     }
@@ -219,6 +227,7 @@ export async function runGeminiStep({
       const text = await response.text();
       lastStatus = response.status;
       lastMessage = `${m.name}: ${geminiMessage(text)}`;
+      tried.push(`${m.name} (HTTP ${response.status})`);
       console.error(`Gemini ${m.name} error`, response.status, text);
       await log({ http_status: response.status, ok: false, error: text });
       const dailyQuota = text.includes("RESOURCE_EXHAUSTED") && text.includes("PerDay");
@@ -246,6 +255,7 @@ export async function runGeminiStep({
       if (!imagePart) {
         const why = candidate?.finishReason ?? result.promptFeedback?.blockReason ?? "no image in the reply";
         lastMessage = `${m.name}: ${why}${reply ? ` — "${reply.slice(0, 150)}"` : ""}`;
+        tried.push(`${m.name} (no image)`);
         await log({ http_status: response.status, ok: false, response_text: reply, error: `No image (${why})` });
         continue;
       }
@@ -269,11 +279,13 @@ export async function runGeminiStep({
         if (!Array.isArray(parsed)) throw new Error("not a list");
         list = parsed.map((item) => String(item).trim()).filter(Boolean);
       } catch {
+        tried.push(`${m.name} (not a list)`);
         await log({ http_status: response.status, ok: false, response_text: reply, error: "Reply wasn't a JSON list" });
         continue;
       }
     }
     if (!reply || (list && list.length === 0)) {
+      tried.push(`${m.name} (empty reply)`);
       await log({ http_status: response.status, ok: false, response_text: reply, error: "Empty reply" });
       continue;
     }
@@ -287,6 +299,9 @@ export async function runGeminiStep({
     return { error: `Every model hit a limit (${kind}). Last reply — ${lastMessage}` };
   }
   return {
-    error: `Gemini couldn't answer this step${lastMessage ? ` (${lastMessage})` : ""}. Try again.`,
+    error:
+      `Gemini couldn't answer this step${lastMessage ? ` (${lastMessage})` : ""}.` +
+      (tried.length > 1 ? ` Tried: ${tried.join(", ")}.` : "") +
+      " Try again.",
   };
 }
