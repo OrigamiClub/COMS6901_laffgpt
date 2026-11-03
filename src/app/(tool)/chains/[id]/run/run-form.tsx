@@ -73,6 +73,8 @@ export default function RunForm({
     setStates(steps.map(() => ({ status: "waiting" })));
     setRunId(null);
 
+    // Which part was running when a request failed, for the error message.
+    let phase = "starting the run";
     const formData = new FormData(e.currentTarget);
     formData.set("chain_id", String(chainId));
     if (keepImage) formData.set("image_url", keepImage);
@@ -94,6 +96,7 @@ export default function RunForm({
           break;
         }
         setStates((prev) => prev.map((s, j) => (j === i ? { status: "running" } : s)));
+        phase = `step ${i + 1}`;
         const result = await runStep(started.runId, i);
         if ("error" in result) {
           setStates((prev) => prev.map((s, j) => (j === i ? { status: "failed", error: result.error } : s)));
@@ -103,7 +106,13 @@ export default function RunForm({
       }
     } catch (err) {
       console.error(err);
-      setError("Something went wrong talking to the server. Try again.");
+      const detail = err instanceof Error && err.message ? ` (${err.message.slice(0, 200)})` : "";
+      setError(
+        `The server didn't answer while ${phase}${detail}. It may have timed out — check the Vercel function logs, then try again.`
+      );
+      setStates((prev) =>
+        prev.map((s) => (s.status === "running" ? { status: "failed", error: "No answer from the server." } : s))
+      );
     } finally {
       activeRun.current = null;
       setBusy(false);

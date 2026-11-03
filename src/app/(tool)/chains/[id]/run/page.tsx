@@ -4,6 +4,10 @@ import { requireAdmin } from "@/lib/admin";
 import { loadChain } from "@/lib/chains";
 import RunForm from "./run-form";
 
+// Applies to the server actions this page calls. One step can take up to
+// ~50s (see lib/gemini.ts), more than Vercel's default allows on some plans.
+export const maxDuration = 60;
+
 // Run the chain on an image, some text, or both, and watch each step's
 // output come in.
 export default async function RunPage({ params, searchParams }: PageProps<"/chains/[id]/run">) {
