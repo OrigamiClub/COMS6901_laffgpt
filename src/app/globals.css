@@ -1,0 +1,135 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+:root {
+  --background: #fffffe;
+  /* Blue for text and secondary controls; dark enough for 4.5:1 contrast
+     both as text on the background and behind white button text. */
+  --foreground: #4a6f82;
+  --text: var(--foreground);
+  /* Brand orange for big titles; the deeper --primary keeps white text on
+     primary buttons readable. */
+  --title: #d86e4e;
+  --primary: #b9533a;
+  --sage: #5d7f55;
+  --mustard: #8f6721;
+  --plum: #8a5a7a;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-title: var(--title);
+  --color-primary: var(--primary);
+  --color-sage: var(--sage);
+  --color-mustard: var(--mustard);
+  --color-plum: var(--plum);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+/* Dark mode follows data-theme on <html>, which the theme toggle sets
+   (light, dark, or the system setting). See components/theme-toggle.tsx. */
+[data-theme="dark"] {
+  --background: #162027;
+  --foreground: #5b8399;
+  --text: #cfdde5;
+  --title: #e8896a;
+  color-scheme: dark;
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+}
+
+body {
+  background: var(--background);
+  color: var(--text);
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+}
+
+/* Design system: the shared type, card and button styles every page uses.
+   Text: page-title (36px light, brand orange) > section-title (14px semibold)
+   > body (14px) > small print (12px). Color roles: orange (title) is the
+   brand and the one primary action per screen; blue (foreground) is text
+   and secondary controls; the other palette colors belong to content. */
+@utility page-title {
+  @apply text-4xl leading-tight font-light tracking-tight text-title;
+}
+
+@utility section-title {
+  @apply text-sm font-semibold;
+}
+
+@utility card {
+  @apply rounded-lg border border-black/10 p-5 dark:border-white/15;
+}
+
+@utility btn {
+  @apply btn-pop flex h-10 items-center justify-center gap-2 rounded-full border px-4 text-sm font-medium;
+}
+
+/* The one main action on a screen (+ New Crack, Post, Save). */
+@utility btn-primary {
+  @apply btn border-black/10 bg-primary text-white;
+}
+
+/* Everything else that's a button: account, back, secondary actions. */
+@utility btn-secondary {
+  @apply btn border-black/10 bg-foreground text-white;
+}
+
+@utility btn-outline {
+  @apply btn border-foreground text-foreground;
+}
+
+/* Buttons and pills lift on hover and squish when pressed. */
+@utility btn-pop {
+  transition-property: translate, scale, box-shadow;
+  transition-duration: 150ms;
+  &:hover:not(:disabled) {
+    box-shadow: 0 4px 12px rgb(0 0 0 / 0.12);
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    &:hover:not(:disabled) {
+      translate: 0 -2px;
+    }
+    &:active:not(:disabled) {
+      scale: 0.95;
+    }
+  }
+}
+
+/* Items fade and slide in one after another; set --i to the item's index. */
+@media (prefers-reduced-motion: no-preference) {
+  .cascade-in {
+    animation: cascade-in 400ms ease-out backwards;
+    animation-delay: calc(min(var(--i, 0), 12) * 50ms);
+  }
+}
+
+@keyframes cascade-in {
+  from {
+    opacity: 0;
+    translate: 0 12px;
+  }
+}
+
+/* Like button: the heart pops and a few small hearts float away. */
+@keyframes heart-pop {
+  50% {
+    scale: 1.6;
+  }
+}
+
+@keyframes heart-float {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+    translate: var(--dx) -28px;
+    scale: 0.6;
+  }
+}
